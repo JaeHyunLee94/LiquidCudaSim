@@ -68,6 +68,7 @@ void initEngine(mpm::EngineConfig config) {
 
   engine->addParticles(particles);
   engine->makeAosToSOA();
+  engine->resume();  // auto-start; user can still toggle via GUI button
 }
 
 void resetScene(mpm::Engine *engine_, mpm::EngineConfig config) {

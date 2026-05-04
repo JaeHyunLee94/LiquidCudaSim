@@ -5,6 +5,7 @@
 #include "Engine.h"
 #include <omp.h>
 #include <algorithm>
+#include <chrono>
 
 // CUDA-specific headers are only included when the toolkit is present.
 // SimulationKernel.cu (compiled as CUDA) provides the device implementations.
@@ -355,6 +356,42 @@ void mpm::Engine::integrateWithProfile(mpm::Scalar dt, Profiler &profiler) {
   profiler.endAndReport("g2p");
   profiler.makeArray();
 
+}
+
+void mpm::Engine::integrateBench(mpm::Scalar dt, BenchTiming &t) {
+  // Wall-clock timing for the CPU/OpenMP path.
+  // Note: clock() is wrong here — it sums CPU time across OpenMP threads.
+  using clock = std::chrono::steady_clock;
+  auto ms = [](clock::duration d) {
+    return std::chrono::duration<double, std::milli>(d).count();
+  };
+
+  if (_is_first_step) {
+    makeAosToSOA();
+    initEnergyData();
+    _is_first_step = false;
+  }
+  // benchmarks ignore the run/pause flag — we always advance.
+  _currentFrame++;
+  _currentTime += dt;
+
+  auto t0 = clock::now();
+  initGrid();
+  auto t1 = clock::now();
+  p2g(dt);
+  auto t2 = clock::now();
+  updateGrid(dt);
+  auto t3 = clock::now();
+  g2p(dt);
+  auto t4 = clock::now();
+
+  // initGrid time is folded into total_ms but not reported separately —
+  // it is just a memset-like reset, dwarfed by the three MPM stages.
+  t.p2g_ms        = ms(t2 - t1);
+  t.updateGrid_ms = ms(t3 - t2);
+  t.g2p_ms        = ms(t4 - t3);
+  t.transfer_ms   = 0.0;
+  t.total_ms      = ms(t4 - t0);
 }
 
 #ifdef MPM_CUDA_AVAILABLE

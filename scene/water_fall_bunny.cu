@@ -19,7 +19,9 @@ Profiler     *profiler = nullptr;
 mpm::Engine  *engine   = nullptr;
 
 // ── Scene configuration ──────────────────────────────────────────────────────
-static const float SCENE_DT = 1e-3f;
+// 1e-3 was unstable on bunny: water EOS pressure spikes when J<<1 at the floor
+// violate CFL and the splash explodes vertically. 1e-4 is comfortably stable.
+static const float SCENE_DT = 1e-4f;
 
 static mpm::EngineConfig makeConfig() {
   return mpm::EngineConfig{
@@ -69,6 +71,7 @@ void initEngine(mpm::EngineConfig config) {
   engine->addParticles(particles);
   fmt::print("particle count: {}\n", engine->getParticleCount());
   engine->makeAosToSOA();
+  engine->resume();  // auto-start; user can still toggle via GUI button
 }
 
 #ifdef MPM_DISPLAY_AVAILABLE

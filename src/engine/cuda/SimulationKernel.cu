@@ -468,6 +468,92 @@ void mpm::Engine::integrateWithCuda(Scalar dt) {
 
 }
 
+// ── Benchmark variant of integrateWithCuda ──────────────────────────────────
+// Per-kernel timing via cudaEvent (device-accurate). H2D + D2H transfer time
+// is measured with cudaEvent too (recorded around the memcpy calls).
+void mpm::Engine::integrateWithCudaBench(Scalar dt, BenchTiming &t) {
+  const unsigned int particle_num = m_sceneParticles.size();
+  const unsigned int grid_num =
+      _grid.getGridDimX() * _grid.getGridDimY() * _grid.getGridDimZ();
+
+  unsigned int particle_block_size = 64;
+  unsigned int particle_grid_size  =
+      (particle_num + particle_block_size - 1) / particle_block_size;
+  unsigned int grid_block_size = 64;
+  unsigned int grid_grid_size  =
+      (grid_num + grid_block_size - 1) / grid_block_size;
+
+  cudaEvent_t e_total_b, e_total_e;
+  cudaEvent_t e_h2d_b,   e_h2d_e;
+  cudaEvent_t e_p2g_b,   e_p2g_e;
+  cudaEvent_t e_grid_b,  e_grid_e;
+  cudaEvent_t e_g2p_b,   e_g2p_e;
+  cudaEvent_t e_d2h_b,   e_d2h_e;
+  for (auto* ev : {&e_total_b,&e_total_e,&e_h2d_b,&e_h2d_e,&e_p2g_b,&e_p2g_e,
+                   &e_grid_b,&e_grid_e,&e_g2p_b,&e_g2p_e,&e_d2h_b,&e_d2h_e}) {
+    cudaEventCreate(ev);
+  }
+
+  cudaEventRecord(e_total_b);
+
+  cudaEventRecord(e_h2d_b);
+  transferDataToDevice();
+  cudaEventRecord(e_h2d_e);
+
+  _is_first_step = false;
+  _currentFrame++;
+  _currentTime += dt;
+
+  cudaEventRecord(e_p2g_b);
+  p2gCuda<<<particle_grid_size, particle_block_size>>>(
+      d_p_mass_ptr, d_p_vel_ptr, d_p_pos_ptr, d_p_F_ptr, d_p_J_ptr, d_p_C_ptr,
+      d_p_V0_ptr, d_p_getStress_ptr, d_g_mass_ptr, d_g_vel_ptr,
+      d_p_del_kinetic_ptr, dt, _grid.dx(), particle_num,
+      _grid.getGridDimX(), _grid.getGridDimY(), _grid.getGridDimZ());
+  cudaEventRecord(e_p2g_e);
+
+  cudaEventRecord(e_grid_b);
+  updateGridCuda<<<grid_grid_size, grid_block_size>>>(
+      d_g_mass_ptr, d_g_vel_ptr,
+      make_float3(_gravity[0], _gravity[1], _gravity[2]), dt, bound,
+      _grid.getGridDimX(), _grid.getGridDimY(), _grid.getGridDimZ());
+  cudaEventRecord(e_grid_e);
+
+  cudaEventRecord(e_g2p_b);
+  g2pCuda<<<particle_grid_size, particle_block_size>>>(
+      d_p_mass_ptr, d_p_vel_ptr, d_p_pos_ptr, d_p_F_ptr, d_p_J_ptr, d_p_C_ptr,
+      d_p_V0_ptr, d_p_project_ptr, d_g_mass_ptr, d_g_vel_ptr, dt, _grid.dx(),
+      particle_num,
+      _grid.getGridDimX(), _grid.getGridDimY(), _grid.getGridDimZ());
+  cudaEventRecord(e_g2p_e);
+
+  cudaEventRecord(e_d2h_b);
+  transferDataFromDevice();
+  cudaEventRecord(e_d2h_e);
+
+  cudaEventRecord(e_total_e);
+  cudaEventSynchronize(e_total_e);
+
+  float ms_h2d=0, ms_p2g=0, ms_grid=0, ms_g2p=0, ms_d2h=0, ms_total=0;
+  cudaEventElapsedTime(&ms_h2d,   e_h2d_b,   e_h2d_e);
+  cudaEventElapsedTime(&ms_p2g,   e_p2g_b,   e_p2g_e);
+  cudaEventElapsedTime(&ms_grid,  e_grid_b,  e_grid_e);
+  cudaEventElapsedTime(&ms_g2p,   e_g2p_b,   e_g2p_e);
+  cudaEventElapsedTime(&ms_d2h,   e_d2h_b,   e_d2h_e);
+  cudaEventElapsedTime(&ms_total, e_total_b, e_total_e);
+
+  for (auto ev : {e_total_b,e_total_e,e_h2d_b,e_h2d_e,e_p2g_b,e_p2g_e,
+                  e_grid_b,e_grid_e,e_g2p_b,e_g2p_e,e_d2h_b,e_d2h_e}) {
+    cudaEventDestroy(ev);
+  }
+
+  t.p2g_ms        = ms_p2g;
+  t.updateGrid_ms = ms_grid;
+  t.g2p_ms        = ms_g2p;
+  t.transfer_ms   = ms_h2d + ms_d2h;
+  t.total_ms      = ms_total;
+}
+
 void mpm::Engine::configureDeviceParticleType() {
   fmt::print("setting Device ParticleWise function\n");
   const unsigned int particle_num = m_sceneParticles.size();

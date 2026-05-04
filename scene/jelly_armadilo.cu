@@ -65,6 +65,7 @@ void initEngine(mpm::EngineConfig config) {
       pow(grid_dx * 0.5, 3), 1, mpm::Vec3f(5, 5, 0));
 
   engine->addParticles(particles);
+  engine->resume();  // auto-start; jelly_armadilo's GUI has no Resume button
 }
 
 #ifdef MPM_DISPLAY_AVAILABLE

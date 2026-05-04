@@ -71,6 +71,7 @@ void initEngine(mpm::EngineConfig config) {
   }
 
   engine->addParticles(particles);
+  engine->resume();  // auto-start; user can still toggle via GUI button
 }
 
 #ifdef MPM_DISPLAY_AVAILABLE

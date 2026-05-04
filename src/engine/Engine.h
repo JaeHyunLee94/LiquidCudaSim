@@ -28,6 +28,15 @@
 
 namespace mpm {
 
+// Per-step timings in milliseconds. Used by benchmarking paths.
+struct BenchTiming {
+  double total_ms      = 0.0;
+  double p2g_ms        = 0.0;
+  double updateGrid_ms = 0.0;
+  double g2p_ms        = 0.0;
+  double transfer_ms   = 0.0;  // CUDA H2D + D2H (only meaningful on GPU path)
+};
+
 enum Device {
   CPU,
   GPU
@@ -162,9 +171,13 @@ class Engine {
   // ── Integration ──────────────────────────────────────────────────────────
   void integrate(Scalar dt);
   void integrateWithProfile(Scalar dt, Profiler &profiler);
+  // Wall-clock CPU benchmark variant (correct for OpenMP unlike clock()).
+  void integrateBench(Scalar dt, BenchTiming &t);
 
 #ifdef MPM_CUDA_AVAILABLE
   void integrateWithCuda(Scalar dt);
+  // CUDA benchmark variant: cudaEvent-based per-kernel timing.
+  void integrateWithCudaBench(Scalar dt, BenchTiming &t);
 #endif
 
   // ── Simulation control ───────────────────────────────────────────────────
