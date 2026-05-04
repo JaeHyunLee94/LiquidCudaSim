@@ -1,13 +1,13 @@
 #!/bin/bash
 # ─────────────────────────────────────────────────────────────────────────────
-# bench.slurm — build & run the MPM benchmark on an HPC node.
+# bench.slurm — build & run the MPM benchmark on UW-Madison Euler.
 #
-# Submit with:
+# Submit:
 #   sbatch scripts/bench.slurm
 #
 # Outputs:
-#   results/bench-<jobid>.csv     — one CSV per submission, all configs appended
-#   slurm-<jobid>.out             — stdout/stderr of the run
+#   results/bench-<jobid>.csv     — CSV (one row per backend/thread config)
+#   bench-<jobid>.out / .err      — stdout / stderr
 #
 # Tunable env vars (override at submit time, e.g. `STEPS=500 sbatch …`):
 #   SCENE      cube|bunny       default cube
@@ -15,22 +15,21 @@
 #   WARMUP     untimed steps    default 20
 #   DT         timestep         default 1e-4
 #   GRID       grid resolution  default 64
-#   OMP_LIST   space-separated  thread counts to sweep, default "1 2 4 8 16"
+#   OMP_LIST   thread counts    default "1 2 4 8 16"
 # ─────────────────────────────────────────────────────────────────────────────
 
-#SBATCH --job-name=mpm-bench
-#SBATCH --output=slurm-%j.out
-#SBATCH --error=slurm-%j.out
-#SBATCH --time=00:30:00
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16          # OpenMP runs use up to this many
+#SBATCH -p instruction              # class partition (priority for students)
+#SBATCH -J mpm-bench
+#SBATCH -o bench-%j.out
+#SBATCH -e bench-%j.err
+#SBATCH -t 00:30:00
+#SBATCH -c 16                       # OpenMP sweep tops out around here
 #SBATCH --mem=16G
-#SBATCH --partition=interactive     # only partition on this Euler cluster
-# Pick one GPU type. A100 / H100 are the strongest; rtxa4500 / rtx4000ada
-# usually have more nodes free → shorter queue. Override at submit time:
-#     sbatch --gres=gpu:h100:1 scripts/bench.slurm
-#SBATCH --gres=gpu:a100:1
+# Pin a GPU type, or use `--gres=gpu:1` for any-free. Override at submit time:
+#     sbatch --gres=gpu:a100:1     scripts/bench.slurm
+#     sbatch --gres=gpu:h100:1     scripts/bench.slurm
+#     sbatch --gres=gpu:rtxa4500:1 scripts/bench.slurm
+#SBATCH --gres=gpu:1
 
 set -euo pipefail
 
@@ -48,21 +47,16 @@ RESULTS_DIR="${PROJECT_ROOT}/results"
 CSV="${RESULTS_DIR}/bench-${SLURM_JOB_ID:-local}.csv"
 mkdir -p "${RESULTS_DIR}"
 
-# ─── Modules (Euler / Lmod) ──────────────────────────────────────────────────
-# Names chosen from `module avail` on euler-login-1:
-#   cmake/4.1.2           (from /opt/ohpc/pub/modulefiles)
-#   gcc/13.2.0            (CUDA 12.5 supports up to gcc 13)
-#   nvidia/cuda/12.5.0    (avoid 13.0.0 default — too new for this codebase)
-# Module load is best-effort: missing names won't abort the job.
-module purge 2>/dev/null || true
-module load cmake/4.1.2          2>/dev/null || true
-module load gcc/13.2.0           2>/dev/null || true
-module load nvidia/cuda/12.5.0   2>/dev/null || true
+# ─── Modules ─────────────────────────────────────────────────────────────────
+# Match the repo759 HW pattern: load CUDA only — gcc + cmake on Euler are on
+# PATH by default. Override CUDA_MODULE in env to test other versions.
+CUDA_MODULE="${CUDA_MODULE:-nvidia/cuda/13.0.0}"
+module load "${CUDA_MODULE}"
 
-# Verify what's actually on PATH (helpful when a module silently failed)
-echo "  cmake : $(command -v cmake) ($(cmake --version 2>/dev/null | head -1))"
-echo "  gcc   : $(command -v gcc)   ($(gcc --version 2>/dev/null | head -1))"
-echo "  nvcc  : $(command -v nvcc)  ($(nvcc --version 2>/dev/null | tail -1))"
+# Verify tools (handy when a module silently failed)
+echo "  cmake : $(command -v cmake)  ($(cmake --version 2>/dev/null | head -1))"
+echo "  gcc   : $(command -v gcc)    ($(gcc --version   2>/dev/null | head -1))"
+echo "  nvcc  : $(command -v nvcc)   ($(nvcc --version  2>/dev/null | tail -1))"
 
 # ─── Banner ──────────────────────────────────────────────────────────────────
 echo "==============================================================="
@@ -70,14 +64,17 @@ echo "MPM benchmark — job ${SLURM_JOB_ID:-local}  on $(hostname)"
 echo "  scene=${SCENE} steps=${STEPS} warmup=${WARMUP} dt=${DT} grid=${GRID}"
 echo "  omp sweep: ${OMP_LIST}"
 echo "  CSV: ${CSV}"
+GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 | tr ' ' '_')
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null \
     || echo "  (nvidia-smi not available — GPU run will be skipped if no compiler)"
+echo "  GPU tag for CSV: ${GPU_NAME:-none}"
 echo "==============================================================="
 
 # ─── 1. Build CUDA flavour (headless) ────────────────────────────────────────
-# Fat-binary arch list covers every GPU type in this cluster:
+# Fat-binary arch list covers every modern GPU on this cluster.
+# CUDA 13 dropped Maxwell/Pascal so we start at 75 (Turing).
 #   75 = rtx2080ti, 80 = a100, 86 = rtxa4500, 89 = rtx4000ada, 90 = h100
-# Override with CUDA_ARCH=80 sbatch ... if you want a single-target build.
+# Override with CUDA_ARCH=80 sbatch ... for a single-target build.
 CUDA_ARCH="${CUDA_ARCH:-75;80;86;89;90}"
 build_cuda_dir="${PROJECT_ROOT}/build-bench-cuda"
 echo "[build] configuring CUDA build at ${build_cuda_dir}  (arch=${CUDA_ARCH})"
@@ -117,7 +114,7 @@ COMMON_ARGS=(--scene "${SCENE}" --steps "${STEPS}" --warmup "${WARMUP}" \
 if [[ -x "${CUDA_EXE}" ]]; then
     echo
     echo "------------- CUDA run -------------"
-    run_bench "${CUDA_EXE}" "${COMMON_ARGS[@]}" --tag "cuda"
+    run_bench "${CUDA_EXE}" "${COMMON_ARGS[@]}" --tag "cuda-${GPU_NAME:-unknown}"
 else
     echo "[skip] CUDA binary not built — likely no CUDA toolkit on this node"
 fi
