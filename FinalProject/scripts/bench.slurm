@@ -42,10 +42,21 @@ GRID="${GRID:-64}"
 OMP_LIST="${OMP_LIST:-1 2 4 8 16}"
 
 # ─── Paths ───────────────────────────────────────────────────────────────────
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Under sbatch, ${BASH_SOURCE[0]} points to a copy of the script under
+# /var/spool/slurmd/, NOT into your project dir. Trust SLURM_SUBMIT_DIR
+# (set by sbatch to the dir you submitted from), and fall back to BASH_SOURCE
+# when the script is run directly (e.g. inside an `srun --pty bash`).
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+    PROJECT_ROOT="${SLURM_SUBMIT_DIR}"
+else
+    PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
+cd "${PROJECT_ROOT}"
 RESULTS_DIR="${PROJECT_ROOT}/results"
 CSV="${RESULTS_DIR}/bench-${SLURM_JOB_ID:-local}.csv"
 mkdir -p "${RESULTS_DIR}"
+echo "[paths] PROJECT_ROOT=${PROJECT_ROOT}"
+echo "[paths] CSV=${CSV}"
 
 # ─── Modules ─────────────────────────────────────────────────────────────────
 # Match the repo759 HW pattern: load CUDA only — gcc + cmake on Euler are on
