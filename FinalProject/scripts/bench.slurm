@@ -25,8 +25,12 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16          # OpenMP runs use up to this many
-#SBATCH --gres=gpu:1                # one GPU for the CUDA build
 #SBATCH --mem=16G
+#SBATCH --partition=interactive     # only partition on this Euler cluster
+# Pick one GPU type. A100 / H100 are the strongest; rtxa4500 / rtx4000ada
+# usually have more nodes free → shorter queue. Override at submit time:
+#     sbatch --gres=gpu:h100:1 scripts/bench.slurm
+#SBATCH --gres=gpu:a100:1
 
 set -euo pipefail
 
@@ -44,14 +48,21 @@ RESULTS_DIR="${PROJECT_ROOT}/results"
 CSV="${RESULTS_DIR}/bench-${SLURM_JOB_ID:-local}.csv"
 mkdir -p "${RESULTS_DIR}"
 
-# ─── Modules (edit for your cluster) ─────────────────────────────────────────
-# These names are the most common defaults on US/EU HPC sites. If your cluster
-# uses different module names, override here. Module load is best-effort:
-# missing modules don't abort the job (the underlying tool may already be on PATH).
+# ─── Modules (Euler / Lmod) ──────────────────────────────────────────────────
+# Names chosen from `module avail` on euler-login-1:
+#   cmake/4.1.2           (from /opt/ohpc/pub/modulefiles)
+#   gcc/13.2.0            (CUDA 12.5 supports up to gcc 13)
+#   nvidia/cuda/12.5.0    (avoid 13.0.0 default — too new for this codebase)
+# Module load is best-effort: missing names won't abort the job.
 module purge 2>/dev/null || true
-module load cmake          2>/dev/null || true
-module load gcc/11         2>/dev/null || true
-module load cuda/12.2      2>/dev/null || true   # any 11.x/12.x works
+module load cmake/4.1.2          2>/dev/null || true
+module load gcc/13.2.0           2>/dev/null || true
+module load nvidia/cuda/12.5.0   2>/dev/null || true
+
+# Verify what's actually on PATH (helpful when a module silently failed)
+echo "  cmake : $(command -v cmake) ($(cmake --version 2>/dev/null | head -1))"
+echo "  gcc   : $(command -v gcc)   ($(gcc --version 2>/dev/null | head -1))"
+echo "  nvcc  : $(command -v nvcc)  ($(nvcc --version 2>/dev/null | tail -1))"
 
 # ─── Banner ──────────────────────────────────────────────────────────────────
 echo "==============================================================="
@@ -64,12 +75,17 @@ nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>
 echo "==============================================================="
 
 # ─── 1. Build CUDA flavour (headless) ────────────────────────────────────────
+# Fat-binary arch list covers every GPU type in this cluster:
+#   75 = rtx2080ti, 80 = a100, 86 = rtxa4500, 89 = rtx4000ada, 90 = h100
+# Override with CUDA_ARCH=80 sbatch ... if you want a single-target build.
+CUDA_ARCH="${CUDA_ARCH:-75;80;86;89;90}"
 build_cuda_dir="${PROJECT_ROOT}/build-bench-cuda"
-echo "[build] configuring CUDA build at ${build_cuda_dir}"
+echo "[build] configuring CUDA build at ${build_cuda_dir}  (arch=${CUDA_ARCH})"
 cmake -S "${PROJECT_ROOT}" -B "${build_cuda_dir}" \
       -DCMAKE_BUILD_TYPE=Release \
       -DMPM_ENABLE_CUDA=ON \
-      -DMPM_ENABLE_DISPLAY=OFF
+      -DMPM_ENABLE_DISPLAY=OFF \
+      -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH}"
 cmake --build "${build_cuda_dir}" --target benchmark -j
 
 # ─── 2. Build OpenMP-only flavour (headless) ─────────────────────────────────
